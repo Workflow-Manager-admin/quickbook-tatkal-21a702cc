@@ -129,41 +129,43 @@ def health(request):
 @permission_classes([AllowAny])
 def user_profile_list_create(request):
     """
-    Get all user profiles or create a new user profile with predefined data.
+    Get all user profiles or create a new user profile.
 
-    POST body: {username, password, full_name, age, phone, preferred_payment_mode, auto_fill_enabled}
+    POST body: {username, password, full_name, age, address, preferred_berth, auto_fill_enabled}
     """
     if request.method == 'GET':
         profiles = UserProfile.objects.all()
         return Response(UserProfileSerializer(profiles, many=True).data)
 
-    # Create user and profile
+    # Handle user registration ("sign up")
+    required_fields = ['username', 'password', 'full_name', 'age', 'address', 'preferred_berth']
+    for field in required_fields:
+        if not request.data.get(field):
+            return Response({"error": f"{field} is required."}, status=drf_status.HTTP_400_BAD_REQUEST)
+
     username = request.data.get("username")
     password = request.data.get("password")
-    if not username or not password:
-        return Response({"error": "Username and password required."}, status=drf_status.HTTP_400_BAD_REQUEST)
-    
+
     if User.objects.filter(username=username).exists():
         return Response({"error": "User already exists."}, status=drf_status.HTTP_400_BAD_REQUEST)
     user = User(username=username)
     user.set_password(password)
     user.save()
 
-    profile_data = {
-        "user": user.id,
+    # Only use allowed fields for UserProfile creation
+    profile_kwargs = {
+        "user": user,
         "full_name": request.data.get("full_name"),
         "age": request.data.get("age"),
-        "phone": request.data.get("phone"),
-        "preferred_payment_mode": request.data.get("preferred_payment_mode", "razorpay"),
-        "auto_fill_enabled": request.data.get("auto_fill_enabled", True)
+        "address": request.data.get("address"),
+        "preferred_berth": request.data.get("preferred_berth"),
+        "auto_fill_enabled": request.data.get("auto_fill_enabled", True),
     }
-    serializer = UserProfileSerializer(data=profile_data)
-    if serializer.is_valid():
-        serializer.save(user=user)
-        return Response(serializer.data, status=drf_status.HTTP_201_CREATED)
-    else:
-        user.delete()
-        return Response(serializer.errors, status=drf_status.HTTP_400_BAD_REQUEST)
+
+    profile = UserProfile.objects.create(**profile_kwargs)
+
+    serializer = UserProfileSerializer(profile)
+    return Response(serializer.data, status=drf_status.HTTP_201_CREATED)
 
 # PUBLIC_INTERFACE
 @api_view(['GET', 'PUT', 'DELETE'])
