@@ -10,10 +10,24 @@ from .views import (
     auto_fill_suggestions,
     payment_initiate,
     payment_callback,
-    payment_status
+    payment_status,
+    # Custom core endpoints
+    register_user,
+    deposit_wallet,
+    create_booking,
+    get_profile,
+    get_bookings
 )
 
 urlpatterns = [
+    # Core endpoints
+    path('register_user/', register_user, name='register_user'),
+    path('deposit_wallet/', deposit_wallet, name='deposit_wallet'),
+    path('create_booking/', create_booking, name='create_booking'),
+    path('get_profile/<int:user_id>/', get_profile, name='get_profile'),
+    path('get_bookings/<int:user_id>/', get_bookings, name='get_bookings'),
+
+    # Existing endpoints
     path('health/', health, name='Health'),
     path('user_profiles/', user_profile_list_create, name='user_profile_list_create'),
     path('user_profiles/<int:user_id>/', user_profile_detail, name='user_profile_detail'),

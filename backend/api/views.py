@@ -3,8 +3,12 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status as drf_status
 from django.contrib.auth.models import User
-from .models import UserProfile, TatkalBooking, PaymentTransaction
-from .serializers import UserProfileSerializer, TatkalBookingSerializer, PaymentTransactionSerializer
+from .models import UserProfile, Booking, PaymentTransaction
+from .serializers import (
+    UserProfileSerializer, BookingSerializer, PaymentTransactionSerializer,
+    DepositWalletSerializer, BookingCreateSerializer
+)
+from django.db import transaction
 
 import random
 import string
@@ -12,6 +16,108 @@ import string
 # Dummy Razorpay setup (Replace with real integration, fetch keys from env)
 RAZORPAY_MOCK_KEY = "rzp_test_mocked"
 RAZORPAY_MOCK_SECRET = "secret_key_mocked"
+
+# ----------------------------- Custom Core Tatkal Endpoints -----------------------------
+
+# PUBLIC_INTERFACE
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def register_user(request):
+    """
+    Registers a new user and creates a UserProfile.
+    Expects: username, password, full_name, age, address, preferred_berth.
+    """
+    required_fields = ['username', 'password', 'full_name', 'age', 'address', 'preferred_berth']
+    for field in required_fields:
+        if not request.data.get(field):
+            return Response({"error": f"{field} is required."}, status=drf_status.HTTP_400_BAD_REQUEST)
+    username = request.data["username"]
+    password = request.data["password"]
+    if User.objects.filter(username=username).exists():
+        return Response({"error": "Username already exists."}, status=drf_status.HTTP_400_BAD_REQUEST)
+    user = User.objects.create_user(username=username, password=password)
+    # Create UserProfile
+    profile = UserProfile.objects.create(
+        user=user,
+        full_name=request.data["full_name"],
+        age=request.data["age"],
+        address=request.data["address"],
+        preferred_berth=request.data["preferred_berth"]
+    )
+    serializer = UserProfileSerializer(profile)
+    return Response(serializer.data, status=drf_status.HTTP_201_CREATED)
+
+# PUBLIC_INTERFACE
+@api_view(['POST'])
+def deposit_wallet(request):
+    """
+    Deposit funds to a user's wallet. Expects: user_id, amount (POST).
+    """
+    user_id = request.data.get("user_id")
+    serializer = DepositWalletSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=drf_status.HTTP_400_BAD_REQUEST)
+    try:
+        user = User.objects.get(id=user_id)
+        profile = user.profile
+    except Exception:
+        return Response({"error": "User not found."}, status=drf_status.HTTP_404_NOT_FOUND)
+    amount = serializer.validated_data["amount"]
+    profile.deposit_wallet(amount)
+    return Response({
+        "wallet_balance": profile.wallet_balance,
+        "deposited": f"{amount}"
+    })
+
+# PUBLIC_INTERFACE
+@api_view(['POST'])
+def create_booking(request):
+    """
+    Create a booking and auto-debit from wallet if enough funds. Expects all Booking fields + user_profile_id.
+    """
+    serializer = BookingCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=drf_status.HTTP_400_BAD_REQUEST)
+    with transaction.atomic():
+        booking = serializer.save()
+        # Try auto wallet debit
+        paid = booking.try_pay_via_wallet()
+        booking.refresh_from_db()  # For .paid values
+        data = BookingSerializer(booking).data
+        data["wallet_auto_debited"] = paid
+        if not paid:
+            data["error"] = "Booking created, but insufficient funds for auto payment. Please recharge wallet."
+        return Response(data, status=drf_status.HTTP_201_CREATED)
+
+# PUBLIC_INTERFACE
+@api_view(['GET'])
+def get_profile(request, user_id):
+    """
+    Get UserProfile for a user by ID.
+    """
+    try:
+        user = User.objects.get(id=user_id)
+        profile = user.profile
+        return Response(UserProfileSerializer(profile).data)
+    except Exception:
+        return Response({"error": "Profile not found."}, status=drf_status.HTTP_404_NOT_FOUND)
+
+# PUBLIC_INTERFACE
+@api_view(['GET'])
+def get_bookings(request, user_id):
+    """
+    Get all bookings for a UserProfile by user_id.
+    """
+    try:
+        user = User.objects.get(id=user_id)
+        profile = user.profile
+    except Exception:
+        return Response({"error": "User Profile not found."}, status=drf_status.HTTP_404_NOT_FOUND)
+    bookings = Booking.objects.filter(user_profile=profile).order_by('-booking_time')
+    serializer = BookingSerializer(bookings, many=True)
+    return Response(serializer.data)
+
+# ---------------- Legacy endpoints for backwards compatibility -------------------------
 
 @api_view(['GET'])
 def health(request):
@@ -96,10 +202,10 @@ def tatkal_booking_create(request):
         passenger_name, passenger_age, passenger_sex
     }
     """
-    serializer = TatkalBookingSerializer(data=request.data)
+    serializer = BookingSerializer(data=request.data)
     if serializer.is_valid():
         booking = serializer.save(booking_status="payment_pending")
-        return Response(TatkalBookingSerializer(booking).data, status=drf_status.HTTP_201_CREATED)
+        return Response(BookingSerializer(booking).data, status=drf_status.HTTP_201_CREATED)
     return Response(serializer.errors, status=drf_status.HTTP_400_BAD_REQUEST)
 
 # PUBLIC_INTERFACE
@@ -112,9 +218,9 @@ def tatkal_booking_status(request, booking_id):
     Params: booking_id
     """
     try:
-        booking = TatkalBooking.objects.get(id=booking_id)
-        return Response(TatkalBookingSerializer(booking).data)
-    except TatkalBooking.DoesNotExist:
+        booking = Booking.objects.get(id=booking_id)
+        return Response(BookingSerializer(booking).data)
+    except Booking.DoesNotExist:
         return Response({"error": "Booking not found."}, status=drf_status.HTTP_404_NOT_FOUND)
 
 # PUBLIC_INTERFACE
@@ -125,14 +231,14 @@ def tatkal_booking_cancel(request, booking_id):
     Cancel an existing booking by ID.
     """
     try:
-        booking = TatkalBooking.objects.get(id=booking_id)
+        booking = Booking.objects.get(id=booking_id)
         if booking.booking_status not in ["booked", "initiated", "payment_pending"]:
             return Response({"error": "Cannot cancel this booking."}, status=drf_status.HTTP_400_BAD_REQUEST)
         booking.booking_status = "cancelled"
         booking.feedback = request.data.get("feedback", "")
         booking.save()
         return Response({"success": "Booking cancelled."}, status=drf_status.HTTP_200_OK)
-    except TatkalBooking.DoesNotExist:
+    except Booking.DoesNotExist:
         return Response({"error": "Booking not found."}, status=drf_status.HTTP_404_NOT_FOUND)
 
 # PUBLIC_INTERFACE
@@ -170,8 +276,8 @@ def payment_initiate(request):
     booking_id = request.data.get("booking_id")
     amount = request.data.get("amount")
     try:
-        booking = TatkalBooking.objects.get(id=booking_id)
-    except TatkalBooking.DoesNotExist:
+        booking = Booking.objects.get(id=booking_id)
+    except Booking.DoesNotExist:
         return Response({"error": "Booking not found."}, status=drf_status.HTTP_404_NOT_FOUND)
 
     # Simulate creation of a Razorpay order

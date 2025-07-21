@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from decimal import Decimal
 from .models import UserProfile, Booking, PaymentTransaction
 
 # PUBLIC_INTERFACE
@@ -24,6 +25,7 @@ class BookingSerializer(serializers.ModelSerializer):
     preferred_berth = serializers.CharField()
     paid = serializers.BooleanField(read_only=True)
     paid_via_wallet = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = Booking
         fields = [
@@ -39,6 +41,34 @@ class BookingSerializer(serializers.ModelSerializer):
         if data['passenger_age'] <= 0:
             raise serializers.ValidationError("Passenger age must be positive number.")
         if 'fare' in data and data['fare'] < 0:
+            raise serializers.ValidationError("Fare cannot be negative.")
+        return data
+
+# PUBLIC_INTERFACE
+class DepositWalletSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    def validate_amount(self, value):
+        if value <= Decimal("0.0"):
+            raise serializers.ValidationError("Deposit amount must be positive.")
+        return value
+
+# PUBLIC_INTERFACE
+class BookingCreateSerializer(serializers.ModelSerializer):
+    user_profile_id = serializers.PrimaryKeyRelatedField(
+        source='user_profile', queryset=UserProfile.objects.all(), write_only=True
+    )
+    class Meta:
+        model = Booking
+        fields = [
+            'user_profile_id', 'source', 'destination', 'journey_date',
+            'passenger_name', 'passenger_age', 'passenger_sex', 'preferred_berth', 'fare'
+        ]
+
+    def validate(self, data):
+        if data.get('passenger_age', 0) <= 0:
+            raise serializers.ValidationError("Passenger age must be positive.")
+        if data.get('fare', Decimal("0.0")) < 0:
             raise serializers.ValidationError("Fare cannot be negative.")
         return data
 
